@@ -7,4 +7,5 @@ target_sources(app PRIVATE
   src/main.c
   src/observer.c
   src/particle_filter.c
+  src/lidar.c
 )

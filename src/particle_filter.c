@@ -2,9 +2,13 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
 #include "arm_math.h"
 #include <stdio.h>
 #include <stdlib.h>
+
+#define LOG_MODULE_NAME particle_filter
+LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_INF);
 
 static float temp_weights[NUM_PARTICLES];
 
