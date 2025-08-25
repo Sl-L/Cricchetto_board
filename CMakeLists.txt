@@ -6,4 +6,5 @@ project(Cricchetto_board)
 target_sources(app PRIVATE
   src/main.c
   src/observer.c
+  src/particle_filter.c
 )
