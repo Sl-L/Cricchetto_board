@@ -5,7 +5,8 @@ project(Cricchetto_board)
 
 target_sources(app PRIVATE
   src/main.c
-  src/observer.c
-  src/particle_filter.c
-  src/lidar.c
+  src/lib/ble.c
+  src/lib/observer.c
+  src/lib/particle_filter.c
+  src/lib/lidar.c
 )
