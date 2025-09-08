@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 #define LOG_MODULE_NAME particle_filter
-LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_DBG);
 
 static float temp_weights[NUM_PARTICLES];
 
@@ -75,26 +75,27 @@ void update_weights(
     float measurement_RSSI[],
     float temp_weights[]
 ) {
-    arm_fill_f32(0.0f, temp_weights, NUM_PARTICLES);
+    arm_fill_f32(-F32_MIN, temp_weights, NUM_PARTICLES);
 
     static float d_squared[NUM_PARTICLES];
+    static float dx[NUM_PARTICLES];
+    static float dy[NUM_PARTICLES];
     static float expected_rssi[NUM_PARTICLES];
     static float weight_update[NUM_PARTICLES];
     
-    static float dx, dy;
     static float weight_scale;
     for (int i = 0; i < NUM_BEACONS; i++) {
         float rssi_scale = - 2.1714724095f * beacon_path_loss[i];
         weight_scale = - 0.5f / (beacon_std[i] * beacon_std[i]);
-
+        
         // Calculate squared distance
-        for (int j = 0; j < NUM_PARTICLES; j++) {
-            dx = particle_x[j] - beacon_x[i];
-            dy = particle_y[j] - beacon_y[i];
+        arm_offset_f32(particle_x, -beacon_x[i], dx, NUM_PARTICLES);
+        arm_offset_f32(particle_y, -beacon_y[i], dy, NUM_PARTICLES);
+        arm_mult_f32(dx, dx, dx, NUM_PARTICLES);
+        arm_mult_f32(dy, dy, dy, NUM_PARTICLES);
+        arm_add_f32(dx, dy, d_squared, NUM_PARTICLES);
+        arm_clip_f32(d_squared, d_squared, 0.01f, F32_MAX, NUM_PARTICLES);
 
-            d_squared[j] = dx*dx + dy*dy;
-            if (d_squared[j] < 0.01f) d_squared[j] = 0.01f;
-        }
         /* 
         Calculate expected RSSI using squared distances 
         
@@ -102,9 +103,8 @@ void update_weights(
         */
         arm_vlog_f32(d_squared, d_squared, NUM_PARTICLES);
         arm_scale_f32(d_squared, rssi_scale, expected_rssi, NUM_PARTICLES);
-        // arm_offset_f32(expected_rssi, beacon_ref_rssi[i], expected_rssi, NUM_PARTICLES);
         
-        // Calculate Gaussian likelihood
+        // Calculate Gaussian log-likelihood
         arm_offset_f32(expected_rssi, beacon_ref_rssi[i]-measurement_RSSI[i], weight_update, NUM_PARTICLES);
         arm_mult_f32(weight_update, weight_update, weight_update, NUM_PARTICLES);
         arm_scale_f32(weight_update, weight_scale, weight_update, NUM_PARTICLES);
@@ -304,9 +304,9 @@ int test_particle_filter(void) {
         cumsum_estimate += k_uptime_get_32() - dt_estimate;
 
         //Print results
-        // LOG_DBG("Step %2d: True (%.2f, %.2f), Estimated (%.2f, %.2f)",
-        //        t, (double)true_pos.x, (double)true_pos.y,
-        //        (double)estimated_trajectory[t].x, (double)estimated_trajectory[t].y);
+        LOG_DBG("Step %2d: True (%.2f, %.2f), Estimated (%.2f, %.2f)",
+               t, (double)true_pos.x, (double)true_pos.y,
+               (double)estimated_trajectory[t].x, (double)estimated_trajectory[t].y);
     }
 
     uint32_t end = k_uptime_get_32();
