@@ -80,11 +80,11 @@ void update_weights(
     static float d_squared[NUM_PARTICLES];
     static float expected_rssi[NUM_PARTICLES];
     static float weight_update[NUM_PARTICLES];
-    const float rssi_scale = - 2.1714724095f * PATH_LOSS_EXPONENT;
-
+    
     static float dx, dy;
     static float weight_scale;
     for (int i = 0; i < NUM_BEACONS; i++) {
+        float rssi_scale = - 2.1714724095f * beacon_path_loss[i];
         weight_scale = - 0.5f / (beacon_std[i] * beacon_std[i]);
 
         // Calculate squared distance
@@ -102,10 +102,10 @@ void update_weights(
         */
         arm_vlog_f32(d_squared, d_squared, NUM_PARTICLES);
         arm_scale_f32(d_squared, rssi_scale, expected_rssi, NUM_PARTICLES);
-        arm_offset_f32(expected_rssi, beacon_ref_rssi[i], expected_rssi, NUM_PARTICLES);
+        // arm_offset_f32(expected_rssi, beacon_ref_rssi[i], expected_rssi, NUM_PARTICLES);
         
         // Calculate Gaussian likelihood
-        arm_offset_f32(expected_rssi, -measurement_RSSI[i], weight_update, NUM_PARTICLES);
+        arm_offset_f32(expected_rssi, beacon_ref_rssi[i]-measurement_RSSI[i], weight_update, NUM_PARTICLES);
         arm_mult_f32(weight_update, weight_update, weight_update, NUM_PARTICLES);
         arm_scale_f32(weight_update, weight_scale, weight_update, NUM_PARTICLES);
         
@@ -241,11 +241,11 @@ int test_particle_filter(void) {
     const Point v = {0.2f, 0.1f};
     const Area map = {{0.0f, 0.0f}, {10.0f, 10.0f}};
 
-    printk("Initializing particles\n");
+    LOG_DBG("Initializing particles\n");
     // Initialize particles
     initialize_particle_filter(&map, particle_x, particle_y, particle_w);
     
-    printk("Particles ready, starting simulation\n");
+    LOG_DBG("Particles ready, starting simulation\n");
 
     // Simulation variables
     Point true_pos = {0.0f, 0.0f};
@@ -304,24 +304,24 @@ int test_particle_filter(void) {
         cumsum_estimate += k_uptime_get_32() - dt_estimate;
 
         //Print results
-        printk("Step %2d: True (%.2f, %.2f), Estimated (%.2f, %.2f)\n",
-               t, (double)true_pos.x, (double)true_pos.y,
-               (double)estimated_trajectory[t].x, (double)estimated_trajectory[t].y);
+        // LOG_DBG("Step %2d: True (%.2f, %.2f), Estimated (%.2f, %.2f)",
+        //        t, (double)true_pos.x, (double)true_pos.y,
+        //        (double)estimated_trajectory[t].x, (double)estimated_trajectory[t].y);
     }
 
     uint32_t end = k_uptime_get_32();
-    printk("Elapsed time: %d ms\n", end - start);
-    printk("Movement prediction time: %d ms\n", cumsum_predict);
-    printk("Weight update time: %d ms\n", cumsum_update);
-    printk("Particle resample time: %d ms (resamples: %d)\n", cumsum_resample, rs);
-    printk("Position estimation time: %d ms\n", cumsum_estimate);
+    LOG_INF("Elapsed time: %d ms", end - start);
+    LOG_DBG("Movement prediction time: %d ms", cumsum_predict);
+    LOG_DBG("Weight update time: %d ms", cumsum_update);
+    LOG_DBG("Particle resample time: %d ms (resamples: %d)", cumsum_resample, rs);
+    LOG_DBG("Position estimation time: %d ms", cumsum_estimate);
 
-    printk("\nAverages:\n");
-    printk("  Total: %d ms\n", (end - start) / SIMULATION_STEPS);
-    printk("  Movement prediction: %d ms\n", cumsum_predict / SIMULATION_STEPS);
-    printk("  Weight update: %d ms\n", cumsum_update / SIMULATION_STEPS);
-    printk("  Particle resample: %d ms\n", cumsum_resample / SIMULATION_STEPS);
-    printk("  Position estimation: %d ms\n", cumsum_estimate / SIMULATION_STEPS);
+    LOG_INF("\nAverages:");
+    LOG_INF("  Total: %d ms", (end - start) / SIMULATION_STEPS);
+    LOG_DBG("  Movement prediction: %d ms", cumsum_predict / SIMULATION_STEPS);
+    LOG_DBG("  Weight update: %d ms", cumsum_update / SIMULATION_STEPS);
+    LOG_DBG("  Particle resample: %d ms", cumsum_resample / SIMULATION_STEPS);
+    LOG_DBG("  Position estimation: %d ms", cumsum_estimate / SIMULATION_STEPS);
 
     return 0;
 }
