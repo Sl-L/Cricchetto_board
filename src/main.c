@@ -8,7 +8,8 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/logging/log.h>
 
-#include "observer.h"
+#include "lib/observer.h"
+#include "lib/particle_filter.h"
 
 #define LOG_MODULE_NAME main
 LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_DBG);
@@ -30,9 +31,11 @@ int main(void)
 
 	while(1) {
 		for (int i = 0; i < BEACON_COUNT; i++) {
-			LOG_DBG("Beacon %d RSSI: %d\n", i, get_beacon_rssi(i));
+			LOG_DBG("Beacon %d RSSI: %d", i, get_beacon_rssi(i));
 		}
-		k_msleep(10000);
+		printk("\n");
+		// test_particle_filter();
+		k_msleep(1000);
 	}
 
 	return 0;
