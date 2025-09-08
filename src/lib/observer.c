@@ -60,12 +60,10 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 {
 	for (int i = 0; i < BEACON_COUNT; i++) {
 		if (bt_addr_le_cmp(addr, &beacon_list[i]->addr) == 0) {
-			char addr_str[BT_ADDR_LE_STR_LEN];
-			bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
 
 			beacon_list[i]->rssi = rssi;
 
-			LOG_DBG("Beacon %d found (RSSI %d)\n", i, rssi);
+			LOG_DBG("Beacon %d found (RSSI %d)", i, rssi);
 
 			break;
 		}
