@@ -1,12 +1,4 @@
-/*
- * Copyright (c) 2018 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
- */
-
-/** @file
- *  @brief Nordic UART Bridge Service (NUS) sample
- */
+#include "ble.h"
 #include <zephyr/types.h>
 #include <zephyr/kernel.h>
 
@@ -28,25 +20,79 @@
 
 #include <zephyr/logging/log.h>
 
+#include <zephyr/drivers/gpio.h>
+
+#include <zephyr/sys/ring_buffer.h>
+
 #define LOG_MODULE_NAME peripheral_uart
-LOG_MODULE_REGISTER(LOG_MODULE_NAME);
+LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_DBG);
 
-#define STACKSIZE CONFIG_BT_NUS_THREAD_STACK_SIZE
-#define PRIORITY 7
+const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart20));
 
-#define DEVICE_NAME CONFIG_BT_DEVICE_NAME
-#define DEVICE_NAME_LEN	(sizeof(DEVICE_NAME) - 1)
+uint8_t request_scan[2] = {0xA5, 0x20};
+uint8_t request_stop[2] = {0xA5, 0x25};
 
-#define UART_BUF_SIZE CONFIG_BT_NUS_UART_BUFFER_SIZE
-#define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
-#define UART_WAIT_FOR_RX CONFIG_BT_NUS_UART_RX_WAIT_TIME
+const struct uart_config uart_cfg = {
+	.baudrate = 460800,
+	.parity = UART_CFG_PARITY_NONE,
+	.stop_bits = UART_CFG_STOP_BITS_1,
+	.data_bits = UART_CFG_DATA_BITS_8,
+	.flow_ctrl = UART_CFG_FLOW_CTRL_NONE
+};
 
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
+
+static uint8_t ring_buf_data[RING_BUFF_SIZE];
+struct ring_buf uart_ring_buf;
+
+static void bt_repeat_work_handler(struct k_work *work);
+
+static K_WORK_DEFINE(repeat_uart_on_bt, bt_repeat_work_handler);
+
+static void bt_repeat_work_handler(struct k_work *work) {
+	k_sem_take(&ble_init_ok, K_FOREVER);
+	
+	static uint8_t data[BT_TX_PKG_SIZE];
+	static uint16_t len;
+
+	static uint8_t peek_buf[2];
+
+	if (ring_buf_size_get(&uart_ring_buf) > 1) {
+		ring_buf_peek(&uart_ring_buf, peek_buf, sizeof(peek_buf));
+		if ((peek_buf[0] == 0xA5) && (peek_buf[1] == 0x5A)) {
+			// Discard descriptor
+			len = ring_buf_get(&uart_ring_buf, data, 7);
+			if ((len == 7) && (ring_buf_size_get(&uart_ring_buf) >= BT_TX_PKG_SIZE)) {
+				len = ring_buf_get(&uart_ring_buf, data, BT_TX_PKG_SIZE);
+				if (bt_nus_send(NULL, data, len)) {
+					LOG_WRN("Failed to send data over BLE connection");
+				}
+			}
+		}
+	}
+}
+
+static uint8_t rx_buf[RECEIVE_BUFF_SIZE];
+
+static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data) {
+	switch (evt->type) {
+	case UART_RX_RDY:
+		if (evt->data.rx.len > 0) {
+			ring_buf_put(&uart_ring_buf, &evt->data.rx.buf[evt->data.rx.offset], evt->data.rx.len);
+			k_work_submit(&repeat_uart_on_bt);
+		}
+		break;
+    case UART_RX_DISABLED:
+        uart_rx_enable(dev, (uint8_t *)user_data, RECEIVE_BUFF_SIZE, RX_TIMEOUT);
+        break;
+    default:
+        break;
+	}
+}
 
 static struct bt_conn *current_conn;
 static struct bt_conn *auth_conn;
 static struct k_work adv_work;
-
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -146,17 +192,39 @@ static struct bt_nus_cb nus_cb = {
 	.received = bt_receive_cb,
 };
 
-void error(void)
-{
-	while (true) {
-		/* Spin for ever */
-		k_sleep(K_MSEC(1000));
-	}
-}
-
 int initiate_bt_conn(void)
 {
 	int err;
+	int ret;
+
+	ring_buf_init(&uart_ring_buf, RING_BUFF_SIZE, ring_buf_data);
+
+	err = uart_configure(uart, &uart_cfg);
+
+	if (err) {
+		LOG_ERR("UART Configuration Error: %d", -err);
+		return -ENOSYS;
+	} else {
+		LOG_INF("UART Configured\n");
+	}
+
+	ret = uart_callback_set(uart, uart_cb, rx_buf);
+
+	if (ret) {
+		LOG_ERR("Couldn't set UART Callback");
+		return 1;
+	} else {
+		LOG_INF("UART Callback Set\n");
+	}
+
+	ret = uart_rx_enable(uart, rx_buf, sizeof rx_buf, RX_TIMEOUT);
+
+	if (ret) {
+		LOG_ERR("Couldn't enable UART RX");
+		return 1;
+	} else {
+		LOG_INF("UART RX Enabled\n");
+	}
 
 	if (IS_ENABLED(CONFIG_BT_NUS_SECURITY_ENABLED)) {
 		err = bt_conn_auth_cb_register(&conn_auth_callbacks);
@@ -195,26 +263,20 @@ int initiate_bt_conn(void)
 	k_work_init(&adv_work, adv_work_handler);
 	advertising_start();
 
-    return 0;
-}
-
-void ble_write_thread(void)
-{
-	/* Don't go any further until BLE is initialized */
-	k_sem_take(&ble_init_ok, K_FOREVER);
-
-	uint8_t data[] = {72, 101, 108, 108, 111, 32, 102, 114, 111, 109, 32, 67, 33};
-	uint16_t len = sizeof(data) / sizeof(data[0]);
-
-	for (;;) {
-		/* Wait indefinitely for data to be sent over bluetooth */
-		if (bt_nus_send(NULL, data, len)) {
-			LOG_WRN("Failed to send data over BLE connection");
-		}
-		k_msleep(1000);
+	// Initiate LiDAR scan
+	ret = uart_tx(uart, request_stop, sizeof(request_stop), SYS_FOREVER_MS);
+	if (ret) {
+		printk("TX Error: %d\n", ret);
+		return 1;
 	}
 	
-}
+	k_msleep(1000);
+	
+	ret = uart_tx(uart, request_scan, sizeof(request_scan), SYS_FOREVER_MS);
+	if (ret) {
+		printk("TX Error: %d\n", ret);
+		return 1;
+	}
 
-// K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, ble_write_thread, NULL, NULL,
-// 		NULL, PRIORITY, 0, 0);
+    return 0;
+}

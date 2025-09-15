@@ -8,5 +8,4 @@ target_sources(app PRIVATE
   src/lib/ble.c
   src/lib/observer.c
   src/lib/particle_filter.c
-  src/lib/lidar.c
 )

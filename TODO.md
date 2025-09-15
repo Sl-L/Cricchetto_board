@@ -1,5 +1,4 @@
 # TODO
 
-- Replace printk with propper logging in lidar and particle_filter
-- Integrate particle_filter in main
-- Write actual lidar interface for RP Lidar C1 
+- Some extra optimizations on the memory usage of the particle filter could be done
+regarding the intermediary static vectors used by weight_update and covariance_matrix

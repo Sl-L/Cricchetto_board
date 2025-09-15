@@ -207,6 +207,32 @@ void get_rssi_measurement(Point *true_pos, Point beacons[], float observed_rssi[
     }
 }
 
+Cov covariance_matrix(float particle_x[], float particle_y[], float particle_w[], Point position_estimate) {
+    static float x_buff[NUM_PARTICLES];
+    static float y_buff[NUM_PARTICLES];
+    static float c_buff[NUM_PARTICLES];
+    Cov covar;
+
+    arm_offset_f32(particle_x, -position_estimate.x, x_buff, NUM_PARTICLES); // sum(xi - x)
+
+    arm_offset_f32(particle_y, -position_estimate.y, y_buff, NUM_PARTICLES); // sum(yi - y)
+
+    arm_mult_f32(x_buff, y_buff, c_buff, NUM_PARTICLES); // sum( (xi - x)*(yi - y) )
+    arm_mult_f32(c_buff, particle_w, c_buff, NUM_PARTICLES);
+    arm_accumulate_f32(c_buff, NUM_PARTICLES, &covar.xy);
+
+    arm_mult_f32(x_buff, x_buff, x_buff, NUM_PARTICLES);
+    arm_mult_f32(y_buff, y_buff, y_buff, NUM_PARTICLES);
+    
+    arm_mult_f32(x_buff, particle_w, x_buff, NUM_PARTICLES);
+    arm_mult_f32(y_buff, particle_w, y_buff, NUM_PARTICLES);
+    
+    arm_accumulate_f32(x_buff, NUM_PARTICLES, &covar.xx);
+    arm_accumulate_f32(y_buff, NUM_PARTICLES, &covar.yy);
+
+    return covar;
+}
+
 int test_particle_filter(void) {
     srand(93420817);
 

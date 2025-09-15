@@ -21,6 +21,12 @@ typedef struct {
     Point max;
 } Area;
 
+typedef struct {
+    float xx; // Var(x)
+    float yy; // Var(y)
+    float xy; // Cov(x, y) = Cov(y, x)
+} Cov;
+
 void initialize_particle_filter(
         const Area *map,
         float particle_x[], float particle_y[], float particle_w[]
@@ -42,6 +48,8 @@ void update_weights(
 void resample_particles(float particle_x[], float particle_y[], float particle_w[]);
 
 Point estimate_position(float particle_x[], float particle_y[], float particle_w[]);
+
+Cov covariance_matrix(float particle_x[], float particle_y[], float particle_w[]);
 
 float effective_sample_size(float particle_w[]);
 
