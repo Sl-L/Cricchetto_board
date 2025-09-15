@@ -49,7 +49,7 @@ void resample_particles(float particle_x[], float particle_y[], float particle_w
 
 Point estimate_position(float particle_x[], float particle_y[], float particle_w[]);
 
-Cov covariance_matrix(float particle_x[], float particle_y[], float particle_w[]);
+Cov covariance_matrix(float particle_x[], float particle_y[], float particle_w[], Point position_estimate);
 
 float effective_sample_size(float particle_w[]);
 
