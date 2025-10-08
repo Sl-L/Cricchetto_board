@@ -6,13 +6,10 @@
 #include <zephyr/devicetree.h>
 #include <soc.h>
 
-#include <zephyr/drivers/uart.h>
 // #include <zephyr/bluetooth/conn.h>
 // #include <zephyr/bluetooth/gap.h>
-#include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
-#include <zephyr/bluetooth/hci.h>
 #include <sdc_hci_vs.h>
 
 #include <bluetooth/services/nus.h>
@@ -31,10 +28,12 @@
 #define LOG_MODULE_NAME peripheral_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_DBG);
 
-const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart20));
-
 uint8_t request_scan[2] = {0xA5, 0x20};
+// uint8_t request_express_scan[9] = {0xA5, 0x82, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x23};
 uint8_t request_stop[2] = {0xA5, 0x25};
+uint8_t request_reset[2] = {0xA5, 0x40};
+
+const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart20));
 
 const struct uart_config uart_cfg = {
 	.baudrate = 460800,
@@ -50,6 +49,13 @@ const struct bt_conn_le_phy_param phy_param = {
     .pref_tx_phy = BT_GAP_LE_PHY_2M,
 };
 
+const struct bt_le_scan_param bt_scan_param = {
+		.type       = BT_LE_SCAN_TYPE_PASSIVE,
+		.options    = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+		.interval   = BT_GAP_SCAN_FAST_INTERVAL,
+		.window     = BT_GAP_SCAN_FAST_WINDOW,
+};
+
 static K_SEM_DEFINE(ble_init_ok, 0, 1);
 
 static K_SEM_DEFINE(uart_init_ok, 0, 1);
@@ -57,30 +63,95 @@ static K_SEM_DEFINE(uart_init_ok, 0, 1);
 static uint8_t ring_buf_data[RING_BUFF_SIZE];
 struct ring_buf uart_ring_buf;
 
+static struct bt_conn *current_conn;
+static struct bt_conn *auth_conn;
+static struct k_work adv_work;
+
 static void bt_repeat_work_handler(struct k_work *work);
 
 static K_WORK_DEFINE(repeat_uart_on_bt, bt_repeat_work_handler);
 
+static StatusAdmin status = {false, false, false, false, false, 0x0};
+
 static void bt_repeat_work_handler(struct k_work *work) {
+	if (!status.con_active) {
+		LOG_INF("Canceling queued transmission");
+		return;
+	}
+
 	static uint8_t data[BT_TX_PKG_SIZE];
 	static uint16_t len;
 
 	len = ring_buf_size_get(&uart_ring_buf);
 
-	if (len >= BT_TX_PKG_SIZE) {
-		len = ring_buf_get(&uart_ring_buf, data, BT_TX_PKG_SIZE);
-		int err = bt_nus_send(NULL, data, len);
-		if (err != 0) {
-			LOG_WRN("Failed to send data over BLE connection (err: %d)", err);
+	if (status.con_active) {
+		if (status.expect_response_descriptor && (len > RESPONSE_DESCRIPTOR_SIZE)) {
+			static uint8_t chk_buf[RESPONSE_DESCRIPTOR_SIZE];
+			
+			if (ring_buf_get(&uart_ring_buf, chk_buf, RESPONSE_DESCRIPTOR_SIZE) == RESPONSE_DESCRIPTOR_SIZE) {
+				if (chk_buf[0] == 0xA5 && chk_buf[1] == 0x5A) {
+					LOG_INF("Response descriptor received");
+					status.expect_response_descriptor = false;
+					switch (status.request_id)
+					{
+					case 0x20:
+						status.transmit = true;
+						len = ring_buf_size_get(&uart_ring_buf);
+						break;
+					
+					case 0x52:
+						switch (chk_buf[3])
+						{
+						case 0:
+							LOG_INF("LiDAR Health: GOOD");
+							break;
+
+						case 1:
+							LOG_WRN("LiDAR Health: Warning (Code: %d)", chk_buf[4] + (chk_buf[5]<<8));
+							status.reset_lidar = true;
+							break;
+						}
+
+						case 2:
+							LOG_WRN("LiDAR Health: Error (Code: %d)", chk_buf[4] + (chk_buf[5]<<8));
+							status.stop_lidar = true;
+							break;
+
+
+					default:
+						LOG_WRN("Invalid response descriptor ID");
+						break;
+					}
+
+				} else {
+					LOG_ERR("Error descriptor is invalid");
+					status.reset_lidar = true;
+					return;
+				}
+			}
+			else {
+				LOG_ERR("Error reading ring buffer - No response descriptor");
+				return;
+			}
 		}
-	} else {
-		return;
+		if (status.transmit && len >= SCAN_PKG_SIZE*48) {
+			len = ring_buf_get(&uart_ring_buf, data, SCAN_PKG_SIZE*48);
+			int err = bt_nus_send(current_conn, data, len);
+			if (err != 0) {
+				LOG_WRN("Failed to send data over BLE connection (err: %d)", err);
+				if (err == -128) {
+					status.con_active = false;
+				}
+			}
+		} else {
+			return;
+		}
 	}
+
 	len = ring_buf_size_get(&uart_ring_buf);
-	if (len >= BT_TX_PKG_SIZE) {
+	if (len >= BT_TX_PKG_SIZE && status.con_active && !status.reset_lidar) {
 		k_work_submit(&repeat_uart_on_bt);
 	}
-	
 }
 
 static uint8_t rx_buf[RECEIVE_BUFF_SIZE];
@@ -92,14 +163,11 @@ static void uart_cb(const struct device *dev, struct uart_event *evt, void *user
 		}
 		return;
     }
-
-	ring_buf_put(&uart_ring_buf, &evt->data.rx.buf[evt->data.rx.offset], evt->data.rx.len);
-	k_work_submit(&repeat_uart_on_bt);
+	if (status.con_active) {
+		ring_buf_put(&uart_ring_buf, &evt->data.rx.buf[evt->data.rx.offset], evt->data.rx.len);
+		k_work_submit(&repeat_uart_on_bt);
+	}
 }
-
-static struct bt_conn *current_conn;
-static struct bt_conn *auth_conn;
-static struct k_work adv_work;
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -179,7 +247,6 @@ static struct bt_conn_auth_cb conn_auth_callbacks = {
 	.cancel = auth_cancel,
 };
 
-static bool con_active = false;
 static void connected(struct bt_conn *conn, uint8_t err) {
 	char addr[BT_ADDR_LE_STR_LEN];
 
@@ -188,10 +255,8 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 		return;
 	}
 
-    current_conn = bt_conn_ref(conn);
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 	LOG_INF("Connected %s", addr);
-
 
     /* 2 Mbit PHY */
     bt_conn_le_phy_update(conn, &phy_param);
@@ -203,7 +268,8 @@ static void connected(struct bt_conn *conn, uint8_t err) {
     /* data length + MTU */
     bt_conn_le_data_len_update(conn, BT_LE_DATA_LEN_PARAM_MAX);
 
-	con_active = true;
+    current_conn = bt_conn_ref(conn);
+	status.con_active = true;
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
@@ -223,7 +289,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
 		current_conn = NULL;
 	}
 
-	con_active = false;
+	status.con_active = false;
 }
 
 static void recycled_cb(void) {
@@ -236,9 +302,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected     = disconnected,
 	.recycled         = recycled_cb,
 };
-
-static struct bt_conn_auth_cb conn_auth_callbacks;
-static struct bt_conn_auth_info_cb conn_auth_info_callbacks;
 
 static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data, uint16_t len) {
 	char addr[BT_ADDR_LE_STR_LEN] = {0};
@@ -263,28 +326,56 @@ static struct bt_nus_cb nus_cb = {
 
 static void lidar_handler_thread() {
 	int ret;
-	bool lidar_is_on = false;
+	bool scan_active = false;
 
 	k_sem_take(&uart_init_ok, K_FOREVER);
 	while (1) {
-		if (!con_active) {
-			LOG_INF("Awaiting bluetooth connection...");
-			if (lidar_is_on) {
-				ret = uart_tx(uart, request_stop, sizeof(request_stop), SYS_FOREVER_MS);
-				if (ret) {
-					printk("TX Error: %d\n", ret);
-					return;
-				} else {
-					lidar_is_on = false;
-				}
-			}
-		} else if (!lidar_is_on) {
-			ret = uart_tx(uart, request_scan, sizeof(request_scan), SYS_FOREVER_MS);
+		if (status.stop_lidar) {
+			ret = uart_tx(uart, request_stop, sizeof(request_stop), SYS_FOREVER_MS);
 			if (ret) {
-				printk("TX Error: %d\n", ret);
+				LOG_ERR("TX Error: %d\n", ret);
+			} else {
+				scan_active = false;
+				return;
+			}
+		}
+
+		if (status.reset_lidar) {
+			LOG_WRN("Resetting LiDAR");
+			ret = uart_tx(uart, request_reset, sizeof(request_reset), SYS_FOREVER_MS);
+			if (ret) {
+				LOG_ERR("TX Error: %d\n", ret);
 				return;
 			} else {
-				lidar_is_on = true;
+				scan_active = false;
+			}
+			status.reset_lidar = false;
+			k_msleep(500);
+			ring_buf_reset(&uart_ring_buf);
+		}
+
+		if (!status.con_active) {
+			LOG_INF("Awaiting bluetooth connection...");
+			if (scan_active) {
+				ret = uart_tx(uart, request_stop, sizeof(request_stop), SYS_FOREVER_MS);
+				if (ret) {
+					LOG_ERR("TX Error: %d\n", ret);
+					return;
+				} else {
+					scan_active = false;
+				}
+			}
+			ring_buf_reset(&uart_ring_buf);
+		} else if (!scan_active) {
+			status.expect_response_descriptor = true;
+			status.request_id = 0x20;
+			ret = uart_tx(uart, request_scan, sizeof(request_scan), SYS_FOREVER_MS);
+			if (ret) {
+				LOG_ERR("TX Error: %d\n", ret);
+				status.expect_response_descriptor = false;
+				return;
+			} else {
+				scan_active = true;
 			}
 		}
 		k_msleep(1000);
@@ -347,7 +438,7 @@ int initiate_bt_conn(void) {
 	// Initiate LiDAR scan
 	ret = uart_tx(uart, request_stop, sizeof(request_stop), SYS_FOREVER_MS);
 	if (ret) {
-		printk("TX Error: %d\n", ret);
+		LOG_ERR("TX Error: %d\n", ret);
 		return 1;
 	}
 
@@ -357,7 +448,7 @@ int initiate_bt_conn(void) {
 		LOG_ERR("Couldn't set UART Callback");
 		return 1;
 	} else {
-		LOG_INF("UART Callback Set\n");
+		LOG_INF("UART Callback Set");
 	}
 
 	k_msleep(500);
@@ -368,7 +459,7 @@ int initiate_bt_conn(void) {
 		LOG_ERR("Couldn't enable UART RX");
 		return 1;
 	} else {
-		LOG_INF("UART RX Enabled\n");
+		LOG_INF("UART RX Enabled");
 		k_sem_give(&uart_init_ok);
 	}
 
